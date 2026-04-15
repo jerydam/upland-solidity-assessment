@@ -118,7 +118,16 @@ contract EthexLoto is Ownable, ReentrancyGuard {
             // Cannot settle in the same block as placement
             if (b.blockNumber >= block.number) break;
 
-            
+            (uint256 coefficient, uint8 markedCount, uint256 holdAmount) = getHold(b.amount, b.betData);
+            holdBalance -= holdAmount;
+
+            if (block.number > b.blockNumber + 256) {
+                // EVM limit reached: Refund base bet
+                _sendEth(b.gamer, b.amount);
+                emit BetRefunded(b.id, b.gamer, b.amount);
+            } else {
+                _processWinner(b, markedCount);
+            }
 
             delete betQueue[currentFirst];
             currentFirst++;
@@ -153,7 +162,15 @@ contract EthexLoto is Ownable, ReentrancyGuard {
             if (choice < 0x10) { // Specific Symbol
                 if (target == choice) coefficient += 30;
                 else isSuperPrize = false;
-            
+            } else {
+                isSuperPrize = false;
+                if (choice == 0x10 && target > 0x09 && target < 0x10) coefficient += 5; // Letters
+                else if (choice == 0x11 && target < 0x0A) coefficient += 3; // Numbers
+                else if (choice == 0x12 && target < 0x0A && uint8(target) % 2 != 0) coefficient += 6; // Odd
+                else if (choice == 0x13 && target < 0x0A && uint8(target) % 2 == 0) coefficient += 6; // Even
+            }
+        }
+
         uint256 payoutAmount = (b.amount * coefficient * 8) / (15 * markedCount);
         
         if (payoutAmount > 0) {

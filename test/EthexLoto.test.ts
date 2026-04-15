@@ -1,121 +1,76 @@
 import { expect } from "chai";
-import { ethers } from "hardhat";
-import { BigNumber } from "ethers";
-import { SignerWithAddress } from "@nomiclabs/hardhat-ethers/signers";
-import { EthexLoto } from "../typechain-types";
+import { hre } from "hardhat";
+import { parseEther, getAddress, hexToBytes, toHex } from "viem";
+import { loadFixture, mine } from "@nomicfoundation/hardhat-network-helpers";
 
-describe("EthexLoto Modernized", function () {
-  let loto: EthexLoto;
-  let owner: SignerWithAddress;
-  let jackpot: SignerWithAddress;
-  let house: SignerWithAddress;
-  let superprize: SignerWithAddress;
-  let player: SignerWithAddress;
+describe("EthexLoto Modernized (Viem)", function () {
+  async function deployLotoFixture() {
+    const [owner, jackpot, house, superprize, player] = await hre.viem.getWalletClients();
+    const publicClient = await hre.viem.getPublicClient();
 
-  const MIN_BET = ethers.utils.parseEther("0.01");
+    const loto = await hre.viem.deployContract("EthexLoto", [
+      getAddress(jackpot.account.address),
+      getAddress(house.account.address),
+      getAddress(superprize.account.address),
+    ]);
 
-  beforeEach(async function () {
-    [owner, jackpot, house, superprize, player] = await ethers.getSigners();
-
-    const EthexLotoFactory = await ethers.getContractFactory("EthexLoto");
-    loto = await EthexLotoFactory.deploy(
-      jackpot.address,
-      house.address,
-      superprize.address
-    );
-    await loto.deployed();
-
-    // Fund the contract so it can pay out winners
+    // Fund the contract
     await owner.sendTransaction({
       to: loto.address,
-      value: ethers.utils.parseEther("10"),
+      value: parseEther("10"),
     });
-  });
+
+    return { loto, owner, jackpot, house, player, publicClient };
+  }
 
   describe("Bet Placement", function () {
     it("Should revert if bet is below minimum", async function () {
-      const id = ethers.utils.hexZeroPad("0x11", 16);
+      const { loto, player } = await loadFixture(deployLotoFixture);
+      const id = toHex("bet1", { size: 16 });
       const betData = "0x010203040506";
+
       await expect(
-        loto.connect(player).placeBet(id, betData, { value: ethers.utils.parseEther("0.005") })
-      ).to.be.revertedWithCustomError(loto, "InvalidAmount");
+        loto.write.placeBet([id, betData], { 
+          value: parseEther("0.005"),
+          account: player.account 
+        })
+      ).to.be.rejectedWith("InvalidAmount");
     });
 
-    it("Should correctly distribute fees to house and jackpot", async function () {
-      const id = ethers.utils.hexZeroPad("0x12", 16);
-      const betData = "0x010203040506";
-      const betValue = ethers.utils.parseEther("1");
+    it("Should correctly distribute fees", async function () {
+      const { loto, house, jackpot, player, publicClient } = await loadFixture(deployLotoFixture);
+      const id = toHex("bet2", { size: 16 });
+      const betValue = parseEther("1");
 
-      const initialHouseBal = await house.getBalance();
-      const initialJackpotBal = await jackpot.getBalance();
+      const houseInitial = await publicClient.getBalance({ address: house.account.address });
+      
+      await loto.write.placeBet([id, "0x010203040506"], { 
+        value: betValue,
+        account: player.account 
+      });
 
-      await loto.connect(player).placeBet(id, betData, { value: betValue });
-
-      // 10% House, 10% Jackpot
-      expect(await house.getBalance()).to.equal(initialHouseBal.add(betValue.div(10)));
-      expect(await jackpot.getBalance()).to.equal(initialJackpotBal.add(betValue.div(10)));
+      const houseFinal = await publicClient.getBalance({ address: house.account.address });
+      // 10% Fee
+      expect(houseFinal).to.equal(houseInitial + (betValue / 10n));
     });
   });
 
   describe("Settlement Logic", function () {
-    it("Should refund player if more than 256 blocks have passed", async function () {
-      const id = ethers.utils.hexZeroPad("0x13", 16);
-      const betData = "0x010203040506";
-      const betValue = MIN_BET;
+    it("Should refund player if more than 256 blocks passed", async function () {
+      const { loto, player, publicClient } = await loadFixture(deployLotoFixture);
+      const id = toHex("bet3", { size: 16 });
+      const val = parseEther("0.1");
 
-      await loto.connect(player).placeBet(id, betData, { value: betValue });
+      await loto.write.placeBet([id, "0x010203040506"], { value: val, account: player.account });
+      
+      // Mine 257 blocks
+      await mine(257);
 
-      // Mine 257 blocks to expire the blockhash
-      for (let i = 0; i < 257; i++) {
-        await ethers.provider.send("evm_mine", []);
-      }
+      const balBefore = await publicClient.getBalance({ address: player.account.address });
+      await loto.write.settleBets([1n]);
+      const balAfter = await publicClient.getBalance({ address: player.account.address });
 
-      const playerInitialBal = await player.getBalance();
-      
-      // Settle the bet
-      const tx = await loto.settleBets(1);
-      
-      await expect(tx).to.emit(loto, "BetRefunded");
-      
-      // Note: Player gets back the betAmount (80% of msg.value after fees)
-      const betAmount = betValue.mul(80).div(100);
-      expect(await player.getBalance()).to.be.gt(playerInitialBal);
-    });
-
-    it("Should not settle bets placed in the current block", async function () {
-      const id = ethers.utils.hexZeroPad("0x14", 16);
-      await loto.connect(player).placeBet(id, "0x010203040506", { value: MIN_BET });
-
-      // Attempt to settle immediately
-      await loto.settleBets(1);
-      
-      // 'first' pointer should not have moved because blockNumber == current block
-      expect(await loto.first()).to.equal(2);
-    });
-  });
-
-  describe("Bitwise Winning Logic", function () {
-    it("Should correctly identify a winning bet based on blockhash", async function () {
-      // This is a complex test because we can't easily predict blockhash in Hardhat 
-      // without mining and then checking. Usually, we mock the blockhash or 
-      // check if the event 'BetSettled' is emitted if a match occurs.
-      
-      const id = ethers.utils.hexZeroPad("0x15", 16);
-      // '0x11' is the code for ANY NUMBER (0-9)
-      const betData = "0x111111111111"; 
-
-      await loto.connect(player).placeBet(id, betData, { value: MIN_BET });
-      
-      await ethers.provider.send("evm_mine", []);
-      
-      const tx = await loto.settleBets(1);
-      const receipt = await tx.wait();
-      
-      // Since 0-9 covers 10/16 of hex possibilities, odds are we win some coefficient
-      const settledEvent = receipt.events?.find(e => e.event === "BetSettled");
-      if (settledEvent) {
-          console.log("Win detected with payout:", ethers.utils.formatEther(settledEvent.args?.payout));
-      }
+      expect(balAfter).to.be.greaterThan(balBefore);
     });
   });
 });

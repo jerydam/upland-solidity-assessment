@@ -1,5 +1,5 @@
 import { expect } from "chai";
-import { hre } from "hardhat";
+import hre from "hardhat";
 import { parseEther, getAddress, hexToBytes, toHex } from "viem";
 import { loadFixture, mine } from "@nomicfoundation/hardhat-network-helpers";
 

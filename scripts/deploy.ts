@@ -3,10 +3,9 @@ import { ethers } from "hardhat";
 async function main() {
   console.log("Starting deployment of EthexLoto...");
 
-  // These would be the actual addresses on Scroll/Sepolia
-  const dummyJackpot = "0x1234567890123456789012345678901234567890";
-  const dummyHouse = "0x2345678901234567890123456789012345678901";
-  const dummySuperprize = "0x3456789012345678901234567890123456789012";
+  const dummyJackpot = "";
+  const dummyHouse = "";
+  const dummySuperprize = "";
 
   const EthexLoto = await ethers.getContractFactory("EthexLoto");
   const loto = await EthexLoto.deploy(dummyJackpot, dummyHouse, dummySuperprize);
